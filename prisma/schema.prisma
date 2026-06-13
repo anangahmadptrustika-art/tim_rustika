@@ -1,0 +1,567 @@
+// ============================================================================
+//  Rustika Performance Management System — Prisma Schema
+//  Datasource: PostgreSQL 16
+//  ORM: Prisma 6
+//
+//  Domains:
+//   - Identity & Org    : User, Department, Account, Session (NextAuth)
+//   - Task Management    : Task, TaskAttachment, TaskComment, TaskApproval,
+//                          TaskStatusHistory
+//   - Point System       : PointTransaction, ScoringConfig
+//   - Money Conversion   : ConversionRate, MonthlyBonus
+//   - Compensation       : Compensation, CompensationWorkday
+//   - Gamification       : Badge, UserBadge, Achievement
+//   - Notifications      : Notification
+//   - Platform           : AuditLog, SystemSetting, Holiday
+// ============================================================================
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+//  Enums
+// ----------------------------------------------------------------------------
+
+enum Role {
+  SUPER_ADMIN
+  MANAGER
+  EMPLOYEE
+}
+
+enum TaskStatus {
+  DRAFT // created, not yet assigned/published
+  PENDING_APPROVAL // submitted to manager, awaiting acceptance
+  TODO // approved & assigned, work not started
+  IN_PROGRESS // employee is working
+  SUBMITTED // employee submitted result for review
+  APPROVED // manager approved completion -> points awarded
+  REJECTED // manager rejected, returns to IN_PROGRESS
+  COMPLETED // finalized & scored (terminal)
+  CANCELLED // cancelled (terminal)
+}
+
+enum Difficulty {
+  TRIVIAL // x0.75
+  EASY // x1.0
+  MEDIUM // x1.5
+  HARD // x2.0
+  CRITICAL // x3.0
+}
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PointType {
+  BASE // base points for completing a task
+  EARLY_BONUS // completed before deadline
+  LATE_PENALTY // completed after deadline (negative)
+  DIFFICULTY_MULTIPLIER // adjustment component
+  WEIGHT_MULTIPLIER // adjustment component
+  MANUAL_ADJUSTMENT // admin/manager override
+  ACHIEVEMENT_BONUS // gamification reward
+  COMPENSATION_CREDIT // restored points after compensation completed
+}
+
+enum CompensationStatus {
+  OPEN // obligation created, not yet served
+  IN_PROGRESS // employee logged weekend workday(s)
+  SUBMITTED // submitted for verification
+  VERIFIED // manager verified -> obligation cleared
+  WAIVED // manager waived obligation
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  WHATSAPP
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_DUE_SOON
+  TASK_OVERDUE
+  TASK_APPROVED
+  TASK_REJECTED
+  APPROVAL_REQUESTED
+  POINTS_AWARDED
+  BONUS_PUBLISHED
+  COMPENSATION_REQUIRED
+  COMPENSATION_VERIFIED
+  BADGE_EARNED
+  SYSTEM
+}
+
+enum BadgeTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+// ----------------------------------------------------------------------------
+//  Identity & Organization
+// ----------------------------------------------------------------------------
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String? // null for OAuth-only accounts
+  phone        String? // E.164 for WhatsApp notifications
+  avatarUrl    String?
+  role         Role      @default(EMPLOYEE)
+  jobTitle     String?
+  isActive     Boolean   @default(true)
+  hireDate     DateTime?
+  emailVerified DateTime?
+
+  departmentId String?
+  department   Department? @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
+
+  managerId String?
+  manager   User?  @relation("ManagerReports", fields: [managerId], references: [id], onDelete: SetNull)
+  reports   User[] @relation("ManagerReports")
+
+  // Department this user is the head of (1:1, inverse of Department.head)
+  headedDepartment Department? @relation("DepartmentHead")
+
+  // Task relations
+  assignedTasks Task[] @relation("TaskAssignee")
+  createdTasks  Task[] @relation("TaskCreator")
+
+  // Domain relations
+  pointTransactions PointTransaction[]
+  monthlyBonuses    MonthlyBonus[]
+  compensations     Compensation[]
+  userBadges        UserBadge[]
+  achievements      Achievement[]
+  notifications     Notification[]
+  taskComments      TaskComment[]
+  approvalsGiven    TaskApproval[]    @relation("ApprovalReviewer")
+  auditLogs         AuditLog[]
+
+  // NextAuth
+  accounts Account[]
+  sessions Session[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([role])
+  @@index([departmentId])
+  @@index([managerId])
+}
+
+model Department {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+  colorHex    String  @default("#6366f1")
+
+  headId String? @unique
+  head   User?   @relation("DepartmentHead", fields: [headId], references: [id])
+
+  members User[] @relation("DepartmentMembers")
+  tasks   Task[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// NextAuth adapter models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ----------------------------------------------------------------------------
+//  Task Management
+// ----------------------------------------------------------------------------
+
+model Task {
+  id          String     @id @default(cuid())
+  code        String     @unique @default(cuid()) // human-friendly ref, e.g. TSK-0001 (set in app layer)
+  title       String
+  description String?
+  status      TaskStatus @default(DRAFT)
+  difficulty  Difficulty @default(MEDIUM)
+
+  // weight: relative importance multiplier (1.0 = normal). Drives scoring.
+  weight    Float    @default(1.0)
+  basePoints Int     @default(100)
+
+  startDate    DateTime
+  deadline     DateTime
+  submittedAt  DateTime?
+  completedAt  DateTime? // when finally APPROVED/COMPLETED
+  progress     Int       @default(0) // 0-100
+
+  assigneeId String
+  assignee   User   @relation("TaskAssignee", fields: [assigneeId], references: [id])
+
+  creatorId String
+  creator   User   @relation("TaskCreator", fields: [creatorId], references: [id])
+
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  // Computed at completion (denormalized for reporting speed)
+  awardedPoints Int? // net points awarded once completed
+  wasLate       Boolean @default(false)
+  daysEarly     Int     @default(0)
+  daysLate      Int     @default(0)
+
+  attachments   TaskAttachment[]
+  comments      TaskComment[]
+  approvals     TaskApproval[]
+  statusHistory TaskStatusHistory[]
+  pointTransactions PointTransaction[]
+  compensation  Compensation?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([assigneeId])
+  @@index([creatorId])
+  @@index([status])
+  @@index([deadline])
+  @@index([departmentId])
+}
+
+model TaskAttachment {
+  id         String   @id @default(cuid())
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fileName   String
+  fileUrl    String
+  mimeType   String
+  sizeBytes  Int
+  uploadedBy String
+  createdAt  DateTime @default(now())
+
+  @@index([taskId])
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+model TaskApproval {
+  id         String           @id @default(cuid())
+  taskId     String
+  task       Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  reviewerId String
+  reviewer   User             @relation("ApprovalReviewer", fields: [reviewerId], references: [id])
+  decision   ApprovalDecision @default(PENDING)
+  note       String?
+  decidedAt  DateTime?
+  createdAt  DateTime         @default(now())
+
+  @@index([taskId])
+  @@index([reviewerId])
+}
+
+model TaskStatusHistory {
+  id        String      @id @default(cuid())
+  taskId    String
+  task      Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  from      TaskStatus?
+  to        TaskStatus
+  changedBy String
+  note      String?
+  createdAt DateTime    @default(now())
+
+  @@index([taskId])
+}
+
+// ----------------------------------------------------------------------------
+//  Point System
+// ----------------------------------------------------------------------------
+
+model PointTransaction {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taskId    String?
+  task      Task?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  type      PointType
+  points    Int // signed: positive credits, negative penalties
+  reason    String?
+  // period bucketing for fast monthly accumulation
+  periodYear  Int
+  periodMonth Int // 1-12
+  createdAt   DateTime @default(now())
+  createdBy   String? // null = system/engine
+
+  @@index([userId, periodYear, periodMonth])
+  @@index([taskId])
+  @@index([type])
+}
+
+// Global / per-department scoring configuration used by the calculation engine.
+model ScoringConfig {
+  id           String  @id @default(cuid())
+  name         String  @default("default")
+  isActive     Boolean @default(true)
+  departmentId String? @unique // null = global default
+
+  // multipliers per difficulty
+  multTrivial  Float @default(0.75)
+  multEasy     Float @default(1.0)
+  multMedium   Float @default(1.5)
+  multHard     Float @default(2.0)
+  multCritical Float @default(3.0)
+
+  // bonus / penalty model
+  earlyBonusPerDay   Int @default(10) // points per full day early
+  earlyBonusCap      Int @default(100)
+  latePenaltyPerDay  Int @default(15) // points lost per full day late
+  latePenaltyCap     Int @default(300)
+
+  // compensation trigger: lateness (in days) that mandates compensation
+  compensationThresholdDays Int @default(1)
+  // weekend workdays required per late day
+  compensationDaysPerLateDay Float @default(1.0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ----------------------------------------------------------------------------
+//  Point → Money Conversion & Bonus Reporting
+// ----------------------------------------------------------------------------
+
+model ConversionRate {
+  id           String   @id @default(cuid())
+  // rupiah per point, e.g. 1000 => 1 point = Rp1.000
+  rupiahPerPoint Int    @default(1000)
+  currency     String   @default("IDR")
+  effectiveFrom DateTime @default(now())
+  isActive     Boolean  @default(true)
+  createdBy    String?
+  createdAt    DateTime @default(now())
+
+  @@index([isActive, effectiveFrom])
+}
+
+model MonthlyBonus {
+  id          String  @id @default(cuid())
+  userId      String
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  periodYear  Int
+  periodMonth Int
+
+  totalPoints   Int // net points accumulated in the period
+  rupiahPerPoint Int // snapshot of rate at publish time
+  grossAmount   Int // totalPoints * rupiahPerPoint (in smallest currency unit: rupiah)
+  adjustments   Int     @default(0)
+  netAmount     Int
+  isPublished   Boolean @default(false)
+  publishedAt   DateTime?
+  publishedBy   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, periodYear, periodMonth])
+  @@index([periodYear, periodMonth])
+}
+
+// ----------------------------------------------------------------------------
+//  Compensation System (weekend make-up work for lateness)
+// ----------------------------------------------------------------------------
+
+model Compensation {
+  id        String             @id @default(cuid())
+  taskId    String             @unique
+  task      Task               @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    CompensationStatus @default(OPEN)
+
+  daysLate           Int // lateness that triggered this
+  requiredWorkdays   Float // how many weekend workdays must be served
+  servedWorkdays     Float   @default(0)
+  pointsToRestore    Int     @default(0) // late penalty that can be credited back on verification
+
+  dueBy        DateTime? // deadline to clear the obligation
+  verifiedById String?
+  verifiedAt   DateTime?
+
+  workdays CompensationWorkday[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+model CompensationWorkday {
+  id             String       @id @default(cuid())
+  compensationId String
+  compensation   Compensation @relation(fields: [compensationId], references: [id], onDelete: Cascade)
+  workDate       DateTime // must be a weekend/holiday
+  hours          Float        @default(8)
+  note           String?
+  proofUrl       String?
+  verified       Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@index([compensationId])
+}
+
+// ----------------------------------------------------------------------------
+//  Gamification
+// ----------------------------------------------------------------------------
+
+model Badge {
+  id          String    @id @default(cuid())
+  key         String    @unique // e.g. "EARLY_BIRD"
+  name        String
+  description String
+  iconUrl     String?
+  tier        BadgeTier @default(BRONZE)
+  // JSON criteria evaluated by the gamification engine
+  criteria    Json
+  isActive    Boolean   @default(true)
+
+  userBadges UserBadge[]
+
+  createdAt DateTime @default(now())
+}
+
+model UserBadge {
+  id       String   @id @default(cuid())
+  userId   String
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badgeId  String
+  badge    Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  earnedAt DateTime @default(now())
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+}
+
+model Achievement {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key         String
+  title       String
+  description String?
+  points      Int      @default(0)
+  earnedAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+//  Notifications
+// ----------------------------------------------------------------------------
+
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  channel   NotificationChannel @default(IN_APP)
+  title     String
+  body      String
+  // arbitrary payload, e.g. { taskId, url }
+  data      Json?
+  isRead    Boolean             @default(false)
+  readAt    DateTime?
+  // delivery tracking for email/whatsapp
+  isDelivered Boolean           @default(false)
+  deliveredAt DateTime?
+  createdAt   DateTime          @default(now())
+
+  @@index([userId, isRead])
+  @@index([type])
+}
+
+// ----------------------------------------------------------------------------
+//  Platform: Audit, Settings, Holidays
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String // e.g. "task.approve"
+  entity    String // e.g. "Task"
+  entityId  String?
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([actorId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+model SystemSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+// Holidays + weekend definition used by compensation & SLA day math.
+model Holiday {
+  id        String   @id @default(cuid())
+  date      DateTime @unique
+  name      String
+  createdAt DateTime @default(now())
+}

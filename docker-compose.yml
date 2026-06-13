@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: rustika-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rustika
+      POSTGRES_PASSWORD: rustika
+      POSTGRES_DB: rustika
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rustika']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot migration + seed runner
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: rustika-migrate
+    environment:
+      DATABASE_URL: postgresql://rustika:rustika@db:5432/rustika?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ['sh', '-c', 'npx prisma migrate deploy && npx tsx prisma/seed.ts']
+    restart: 'no'
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rustika-app
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://rustika:rustika@db:5432/rustika?schema=public
+      AUTH_SECRET: ${AUTH_SECRET:-change-me-in-production}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NODE_ENV: production
+    ports:
+      - '3000:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres-data:
