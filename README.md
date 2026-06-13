@@ -49,6 +49,8 @@ obligation; and managers/executives get **real-time analytics**.
 | [`docs/WIREFRAMES.md`](docs/WIREFRAMES.md) | UI wireframes & dashboard designs |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phased development roadmap |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Docker deployment guide |
+| [`docs/SELF_HOST.md`](docs/SELF_HOST.md) | Self-hosting on Proxmox / Ubuntu / CasaOS |
+| [`docs/DEPLOY_RAILWAY.md`](docs/DEPLOY_RAILWAY.md) | One-click-ish Railway deployment |
 
 ## 🚀 Quick Start (local)
 
