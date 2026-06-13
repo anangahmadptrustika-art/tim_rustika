@@ -54,6 +54,21 @@ export const conversionRateSchema = z.object({
   effectiveFrom: z.coerce.date().optional(),
 });
 
+export const createUserSchema = z.object({
+  name: z.string().min(2).max(120),
+  email: z.string().email(),
+  password: z.string().min(8).max(100),
+  role: RoleEnum.default('EMPLOYEE'),
+  phone: z
+    .string()
+    .regex(/^\+?[0-9]{8,15}$/u, 'Use digits, optional leading +')
+    .optional()
+    .or(z.literal('')),
+  jobTitle: z.string().max(120).optional().or(z.literal('')),
+  departmentId: z.string().cuid().optional().or(z.literal('')),
+  managerId: z.string().cuid().optional().or(z.literal('')),
+});
+
 export const compensationWorkdaySchema = z.object({
   compensationId: z.string().cuid(),
   workDate: z.coerce.date(),

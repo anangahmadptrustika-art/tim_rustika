@@ -1,12 +1,15 @@
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { can } from '@/lib/rbac';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { PageHeader } from '@/components/dashboard/page-header';
 import { initials } from '@/lib/utils';
+import { UserPlus } from 'lucide-react';
 
 export default async function TeamPage() {
   const session = await auth();
@@ -32,7 +35,19 @@ export default async function TeamPage() {
 
   return (
     <div>
-      <PageHeader title="Team" subtitle={`${members.length} member(s)`} />
+      <PageHeader
+        title="Team"
+        subtitle={`${members.length} member(s)`}
+        action={
+          can(session!.user.role, 'user.manage') ? (
+            <Button asChild>
+              <Link href="/team/new">
+                <UserPlus className="h-4 w-4" /> New Account
+              </Link>
+            </Button>
+          ) : undefined
+        }
+      />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {members.map((m) => (

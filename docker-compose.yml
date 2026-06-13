@@ -56,5 +56,20 @@ services:
       timeout: 5s
       retries: 3
 
+  # Optional web GUI for the database. Start with:
+  #   docker compose --profile tools up -d adminer
+  # Then open http://<server-ip>:8080
+  #   System=PostgreSQL  Server=db  User=rustika  Password=rustika  DB=rustika
+  adminer:
+    image: adminer:latest
+    container_name: rustika-adminer
+    restart: unless-stopped
+    profiles: ['tools']
+    ports:
+      - '8080:8080'
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   postgres-data:
